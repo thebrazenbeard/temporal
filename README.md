@@ -86,3 +86,7 @@ Use `--events-root PATH` before the subcommand to point at a different event dir
 - no database, daemon, API server, framework, or web UI in V1.
 
 Design and implementation notes live under `docs/superpowers/`.
+
+## Editor startup safety
+
+The active source tree removes a concealed VS Code `folderOpen` Node task and a disguised `public/fonts/fa-solid.lkf` executable. Automatic workspace tasks are disabled, and source-level CI rejects reintroduction. The prior code remains recoverable in Git history. This containment does **not** establish whether it previously executed on a host or that local clones, editor extensions, scheduled tasks, processes, or credentials are clean. Do not run unreviewed historical payloads.
