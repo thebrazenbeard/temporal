@@ -19,9 +19,10 @@ class WorkspaceStartupSafetyTests(unittest.TestCase):
                 content = (ROOT / ".vscode" / name).read_text(encoding="utf-8")
                 self.assertNotRegex(content, re.compile(r'"runOn"\s*:\s*"folderOpen"'))
 
-    def test_automatic_editor_tasks_disabled(self):
+    def test_workspace_does_not_claim_user_task_permission(self):
         settings = json.loads((ROOT / ".vscode" / "settings.json").read_text(encoding="utf-8"))
-        self.assertIs(settings.get("task.allowAutomaticTasks"), False)
+        # VS Code permits this setting only at user/application scope.
+        self.assertNotIn("task.allowAutomaticTasks", settings)
 
     def test_hidden_executable_asset_removed(self):
         self.assertFalse((ROOT / "public" / "fonts" / "fa-solid.lkf").exists())

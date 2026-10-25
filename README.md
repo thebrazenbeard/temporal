@@ -8,6 +8,14 @@ Temporal is a deliberately small time-coded event logger. It records when events
 
 It does **not** decide what an event means. A logged event is not automatically memory, current state, identity, preference, consent, authority, or proof that a proposition is true. Temporal supplies chronology; other systems decide meaning.
 
+## Workspace safety
+
+The committed VS Code task configuration contains no `folderOpen` execution
+task, and `public/fonts/fa-solid.lkf` is absent from this source tree. The
+`task.allowAutomaticTasks` permission is a VS Code user/application setting;
+this repository does not claim to control it. This source-only containment
+does not establish whether earlier content ran on a real host.
+
 ## Event log
 
 Events are newline-delimited JSON (NDJSON), partitioned by canonical UTC date:
