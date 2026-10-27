@@ -384,12 +384,14 @@ def _main(argv: list[str] | None = None) -> int:
                     raise ValueError("--metadata-json must decode to a JSON object")
                 event["metadata"] = metadata
             stored = append_event(args.events_root, event)
-            print(json.dumps(stored, ensure_ascii=False, sort_keys=True))
+            # ASCII-escaped JSON remains lossless and works on Windows consoles
+            # whose default text codec cannot encode arbitrary Unicode.
+            print(json.dumps(stored, ensure_ascii=True, sort_keys=True))
             return 0
 
         if args.command == "list":
             for event in list_events(args.events_root, args.start, args.end):
-                print(json.dumps(event, ensure_ascii=False, sort_keys=True))
+                print(json.dumps(event, ensure_ascii=True, sort_keys=True))
             return 0
 
         seconds = elapsed_seconds(args.events_root, args.start, args.end)

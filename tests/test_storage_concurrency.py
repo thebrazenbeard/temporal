@@ -38,7 +38,7 @@ class ConcurrentStorageTests(unittest.TestCase):
             with patch.object(temporal, "_open_regular_file", side_effect=observed_open):
                 self.assertEqual([event["id"] for event in temporal.load_events(root)], ["existing"])
             self.assertEqual(len(lock_flags), 1)
-            self.assertEqual(lock_flags[0] & os.O_ACCMODE, os.O_RDONLY)
+            self.assertFalse(lock_flags[0] & (os.O_WRONLY | os.O_RDWR))
 
     def test_symlink_partition_directory_cannot_redirect_append(self):
         with tempfile.TemporaryDirectory() as tmp:
