@@ -24,6 +24,26 @@ def _event(event_id: str) -> dict[str, str]:
 
 
 class ConcurrentStorageTests(unittest.TestCase):
+    def test_file_substituting_utc_partition_is_not_ignored(self):
+        for relative in ("2026", "2026/2026-10"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "events"
+                invalid_partition = root / relative
+                invalid_partition.parent.mkdir(parents=True, exist_ok=True)
+                invalid_partition.write_text("not a partition directory")
+                with self.assertRaises(OSError):
+                    temporal.load_events(root)
+
+    def test_dangling_events_root_symlink_is_not_reported_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            try:
+                root.symlink_to(Path(tmp) / "missing-root", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            with self.assertRaises(OSError):
+                temporal.load_events(root)
+
     def test_directory_at_ndjson_leaf_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "events"
