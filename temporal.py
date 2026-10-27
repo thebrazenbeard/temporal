@@ -183,6 +183,11 @@ def _event_files(events_root: Path) -> list[Path]:
         # dangling links and substituted directories. Never hide such damage.
         if path.is_symlink():
             raise OSError(f"refusing symlink storage path: {path}")
+        is_year = path.parent == events_root and re.fullmatch(r"\d{4}", path.name)
+        is_month = (path.parent.parent == events_root and
+                    re.fullmatch(r"\d{4}-\d{2}", path.name))
+        if (is_year or is_month) and not path.is_dir():
+            raise OSError(f"UTC partition is not a directory: {path}")
         if path.name.endswith(".ndjson"):
             files.append(path)
     return sorted(files)
@@ -307,6 +312,8 @@ def _load_events_unlocked(events_root: Path) -> list[dict[str, Any]]:
 
 def load_events(events_root: Path) -> list[dict[str, Any]]:
     events_root = Path(events_root)
+    if events_root.is_symlink() and not events_root.exists():
+        raise OSError(f"event root is a dangling symlink: {events_root}")
     if not events_root.exists():
         return []
     with _event_lock(events_root, create=False):
