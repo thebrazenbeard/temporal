@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import errno
 import os
 import subprocess
 import sys
@@ -70,6 +71,108 @@ class ConcurrentStorageTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 temporal.append_event(root, _event("not-admitted"))
             self.assertEqual(victim.read_bytes(), original)
+
+    def test_hardlinked_leaf_cannot_redirect_an_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            day = root / "2026" / "2026-10"
+            day.mkdir(parents=True)
+            victim = Path(tmp) / "outside.ndjson"
+            original = (json.dumps(_event("existing")) + "\n").encode()
+            victim.write_bytes(original)
+            link = day / "2026-10-27.ndjson"
+            try:
+                os.link(victim, link)
+            except (OSError, NotImplementedError):
+                self.skipTest("file hard links unavailable")
+            with self.assertRaisesRegex(OSError, "multiply-linked"):
+                temporal.append_event(root, _event("not-admitted"))
+            self.assertEqual(victim.read_bytes(), original)
+            with self.assertRaisesRegex(OSError, "multiply-linked"):
+                temporal.load_events(root)
+
+    def test_simulated_windows_contention_eventually_acquires_lock(self):
+        # Linux shim only; actual Windows qualification belongs to CI.
+        class WindowsShim:
+            name = "nt"
+            def __getattr__(self, attr):
+                return getattr(os, attr)
+
+        class FakeMSVCRT:
+            LK_NBLCK = 2
+            LK_UNLCK = 3
+            def __init__(self):
+                self.attempts = 0
+                self.unlocked = False
+            def locking(self, _fd, operation, length):
+                assert length == 1
+                if operation == self.LK_UNLCK:
+                    self.unlocked = True
+                    return
+                self.attempts += 1
+                if self.attempts <= 3:
+                    raise PermissionError(errno.EACCES, "simulated contention")
+
+        fake = FakeMSVCRT()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(temporal, "os", WindowsShim()), \
+             patch.dict(sys.modules, {"msvcrt": fake}):
+            with temporal._event_lock(Path(tmp) / "events"):
+                pass
+        self.assertEqual(fake.attempts, 4)
+        self.assertTrue(fake.unlocked)
+
+    def test_simulated_windows_contention_has_bounded_timeout(self):
+        class WindowsShim:
+            name = "nt"
+            def __getattr__(self, attr):
+                return getattr(os, attr)
+
+        class NeverAvailable:
+            LK_NBLCK = 2
+            LK_UNLCK = 3
+            def __init__(self):
+                self.attempts = 0
+            def locking(self, _fd, _operation, _length):
+                self.attempts += 1
+                raise PermissionError(errno.EACCES, "simulated busy")
+
+        fake = NeverAvailable()
+        clock = iter([100.0, 100.01, 100.07])
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(temporal, "os", WindowsShim()), \
+             patch.dict(sys.modules, {"msvcrt": fake}), \
+             patch.object(temporal, "WINDOWS_LOCK_TIMEOUT_SECONDS", 0.05), \
+             patch("temporal.time.monotonic", side_effect=lambda: next(clock)), \
+             patch("temporal.time.sleep", return_value=None):
+            with self.assertRaisesRegex(TimeoutError, "Timed out waiting"):
+                with temporal._event_lock(Path(tmp) / "events"):
+                    pass
+        self.assertEqual(fake.attempts, 2)
+
+    def test_simulated_windows_noncontention_error_is_immediate(self):
+        class WindowsShim:
+            name = "nt"
+            def __getattr__(self, attr):
+                return getattr(os, attr)
+
+        class BadDescriptor:
+            LK_NBLCK = 2
+            LK_UNLCK = 3
+            def __init__(self):
+                self.attempts = 0
+            def locking(self, _fd, _operation, _length):
+                self.attempts += 1
+                raise OSError(errno.EBADF, "bad descriptor")
+
+        fake = BadDescriptor()
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(temporal, "os", WindowsShim()), \
+             patch.dict(sys.modules, {"msvcrt": fake}):
+            with self.assertRaisesRegex(OSError, "bad descriptor"):
+                with temporal._event_lock(Path(tmp) / "events"):
+                    pass
+        self.assertEqual(fake.attempts, 1)
 
     def test_separate_cli_processes_admit_duplicate_id_once(self):
         with tempfile.TemporaryDirectory() as tmp:
