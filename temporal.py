@@ -2,13 +2,88 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
+import os
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 REQUIRED_FIELDS = ("id", "timestamp", "source", "event")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _assert_safe_path(events_root: Path, path: Path) -> None:
+    """Reject storage symlinks; partition paths must remain inside the chosen root."""
+    if events_root.is_symlink():
+        raise ValueError(f"symlink event root is not allowed: {events_root}")
+    try:
+        relative = path.relative_to(events_root)
+    except ValueError as exc:
+        raise ValueError(f"event path escapes root: {path}") from exc
+    current = events_root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"symlink event storage path is not allowed: {current}")
+    if not path.resolve().is_relative_to(events_root.resolve()):
+        raise ValueError(f"event path escapes root: {path}")
+
+
+def _date_path(events_root: Path, stamp: datetime) -> Path:
+    return (events_root / f"{stamp.year:04d}" / f"{stamp.year:04d}-{stamp.month:02d}"
+            / f"{stamp.date().isoformat()}.ndjson")
+
+
+@contextmanager
+def _storage_lock(events_root: Path, *, create: bool, shared: bool):
+    """OS advisory lock on a persistent sentinel, never created by a reader."""
+    if create:
+        events_root.mkdir(parents=True, exist_ok=True)
+    lock_path = events_root / ".temporal-append.lock"
+    _assert_safe_path(events_root, lock_path)
+    flags = (os.O_RDWR | os.O_CREAT) if create else os.O_RDONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError(f"Temporal lock is not a regular file: {lock_path}")
+    with os.fdopen(fd, "r+b" if create else "rb", buffering=0) as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            if create and os.fstat(handle.fileno()).st_size == 0:
+                handle.write(b"\x00")
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -53,7 +128,9 @@ def _validate_record(record: dict[str, Any], *, require_canonical_timestamp: boo
         raise ValueError("stored timestamp must be canonical UTC ending in Z")
 
     if "local_timestamp" in record:
-        parse_timestamp(record["local_timestamp"])
+        local_stamp = parse_timestamp(record["local_timestamp"])
+        if local_stamp.astimezone(timezone.utc) != parse_timestamp(canonical).astimezone(timezone.utc):
+            raise ValueError("local_timestamp must represent the event timestamp instant")
     if "refs" in record:
         refs = record["refs"]
         if not isinstance(refs, list) or not all(isinstance(ref, str) and ref for ref in refs):
@@ -64,27 +141,35 @@ def _validate_record(record: dict[str, Any], *, require_canonical_timestamp: boo
 
 
 def _event_files(events_root: Path) -> list[Path]:
+    if events_root.is_symlink():
+        raise ValueError(f"symlink event root is not allowed: {events_root}")
     if not events_root.exists():
         return []
     return sorted(path for path in events_root.rglob("*.ndjson") if path.is_file())
 
 
-def load_events(events_root: Path) -> list[dict[str, Any]]:
+def _load_events_unlocked(events_root: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for path in _event_files(Path(events_root)):
+        _assert_safe_path(events_root, path)
         with path.open("r", encoding="utf-8") as handle:
             for line_number, raw in enumerate(handle, start=1):
                 if not raw.strip():
                     continue
                 try:
-                    record = json.loads(raw)
+                    record = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"malformed JSON in {path}:{line_number}: {exc.msg}") from exc
+                except ValueError as exc:
+                    raise ValueError(f"malformed JSON in {path}:{line_number}: {exc}") from exc
                 try:
                     _validate_record(record, require_canonical_timestamp=True)
                 except ValueError as exc:
                     raise ValueError(f"malformed record in {path}:{line_number}: {exc}") from exc
+                expected_path = _date_path(events_root, parse_timestamp(record["timestamp"]))
+                if path != expected_path:
+                    raise ValueError(f"event in incorrect date partition: {path}:{line_number}")
                 event_id = record["id"]
                 if event_id in seen_ids:
                     raise ValueError(f"duplicate event id in log: {event_id}")
@@ -94,22 +179,58 @@ def load_events(events_root: Path) -> list[dict[str, Any]]:
     return events
 
 
+def load_events(events_root: Path) -> list[dict[str, Any]]:
+    events_root = Path(events_root)
+    lock_path = events_root / ".temporal-append.lock"
+    # Existing repos can predate locking. A read that overlaps creation of the
+    # sentinel is retried under its lock rather than exposing a partial append.
+    if not lock_path.exists():
+        try:
+            events = _load_events_unlocked(events_root)
+        except ValueError:
+            if not lock_path.exists():
+                raise
+        else:
+            if not lock_path.exists():
+                return events
+    with _storage_lock(events_root, create=False, shared=True):
+        return _load_events_unlocked(events_root)
+
+
 def append_event(events_root: Path, event: dict[str, Any]) -> dict[str, Any]:
     events_root = Path(events_root)
     candidate = dict(event)
     _validate_record(candidate, require_canonical_timestamp=False)
     candidate["timestamp"] = canonical_timestamp(candidate["timestamp"])
 
-    existing = load_events(events_root)
-    if any(item["id"] == candidate["id"] for item in existing):
-        raise ValueError(f"duplicate event id: {candidate['id']}")
-
     stamp = parse_timestamp(candidate["timestamp"])
-    path = events_root / f"{stamp.year:04d}" / f"{stamp.year:04d}-{stamp.month:02d}" / f"{stamp.date().isoformat()}.ndjson"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
-        handle.write("\n")
+    path = _date_path(events_root, stamp)
+    try:
+        data = (json.dumps(candidate, ensure_ascii=False, separators=(",", ":"),
+                           sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    except ValueError as exc:
+        raise ValueError(f"event is not strict JSON with finite numbers: {exc}") from exc
+    with _storage_lock(events_root, create=True, shared=False):
+        existing = _load_events_unlocked(events_root)
+        if any(item["id"] == candidate["id"] for item in existing):
+            raise ValueError(f"duplicate event id: {candidate['id']}")
+        _assert_safe_path(events_root, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _assert_safe_path(events_root, path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError(f"event target is not a regular file: {path}")
+            # A single syscall is normally sufficient; complete short writes explicitly.
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError("event append made no progress")
+                data = data[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     return candidate
 
 

@@ -25,10 +25,11 @@ Each event requires:
 Optional fields are `local_timestamp`, `refs`, and small `metadata`.
 
 Canonical `timestamp` values are timezone-aware UTC ISO-8601 values ending in `Z`. If an original local/offset timestamp matters, preserve it separately in `local_timestamp`.
+If provided, `local_timestamp` must represent the same instant as `timestamp`. Event records use strict JSON (no duplicate object keys or non-finite numbers), and stored records must reside in the UTC-day partition matching their timestamp.
 
 ## Use
 
-No dependencies beyond Python 3.
+No dependencies beyond Python 3.10 or newer.
 
 Append an event:
 
@@ -80,10 +81,18 @@ Use `--events-root PATH` before the subcommand to point at a different event dir
 
 - append-oriented history;
 - duplicate event IDs are rejected;
+- cooperating Temporal writers serialize duplicate checks and appends through `.temporal-append.lock`, with file-data `fsync` before returning success;
+- concurrent Temporal readers wait for an in-progress append once the lock file exists; older logs lacking a lock file are rechecked if a writer creates it while they are being read;
 - malformed JSON or malformed records fail loudly;
 - canonical ordering is timestamp, then stable ID;
 - arithmetic uses parsed timestamps, never inferred sequence;
 - no database, daemon, API server, framework, or web UI in V1.
+
+### Storage and recovery boundaries
+
+Keep `--events-root` in a **private, trusted local directory**. Static symlinks in the event path are refused, but a hostile process with write access to the directory could swap parent directories between validation and open. The lock is advisory and protects only cooperating Temporal processes; it is not a distributed transaction protocol or a guarantee about unrelated writers, SMB/network shares, or host clock synchronization.
+
+An interrupted write or storage failure can leave an incomplete final NDJSON line. Temporal intentionally **fails closed** on malformed lines and does not delete, truncate, or silently repair historical evidence. Back up the original file, examine its last complete valid record and external provenance, and perform an explicitly reviewed repair before resuming appends. File `fsync` does not guarantee durability of newly created parent directories on every filesystem. Event timestamps represent supplied event time, not independently verified arrival order or causality.
 
 Design and implementation notes live under `docs/superpowers/`.
 
