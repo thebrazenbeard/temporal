@@ -28,7 +28,8 @@ The parser rejects additional top-level fields, duplicate JSON keys (including n
 non-finite numeric values, invalid UTF-8/Unicode, and records larger than 64 KiB including
 their newline. Metadata may contain nested JSON objects and arrays up to 16 container levels;
 record and metadata object keys must be strings. Invalid input is rejected, never repaired
-silently. These limits apply equally to imported NDJSON and new events.
+silently. Each stored record must also match its UTC-day file partition. These
+limits apply equally to imported NDJSON and new events.
 
 Canonical `timestamp` values are timezone-aware UTC ISO-8601 values ending in `Z`. If an original local/offset timestamp matters, preserve it separately in `local_timestamp`.
 When present, `local_timestamp` must identify the same instant as `timestamp`; explicit offsets distinguish repeated local wall-clock times during daylight-saving transitions.
@@ -104,6 +105,11 @@ written as one binary line, followed by a file `fsync`. A crashed process
 releases its OS lock, but a crash, disk-full condition, or I/O fault during a
 write can still leave a partial final line. Temporal **fails closed** when
 reading malformed storage; it never silently truncates or repairs evidence.
+On Windows, cooperating operations retry transient lock contention for at most
+120 seconds, then fail explicitly; large histories still require performance
+qualification. Static symlinks and multiply-linked storage files are refused,
+but this does **not** protect an event directory writable by an adversary who
+can race ancestor-directory replacement.
 Inspect and back up a damaged log before performing an explicit repair.
 
 Reading a legacy or read-only snapshot with no lock file does not create one:

@@ -177,6 +177,13 @@ class TemporalWatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing required fields"):
             load_events(self.events_root)
 
+    def test_load_rejects_valid_record_in_wrong_utc_day(self):
+        path = self.events_root / "2026" / "2026-09" / "2026-09-09.ndjson"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(self.event("wrong-day", "2026-09-08T00:00:00Z")) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "UTC date partition"):
+            load_events(self.events_root)
+
     def test_reading_legacy_snapshot_does_not_create_lock_file(self):
         path = self.events_root / "2026" / "2026-09" / "2026-09-08.ndjson"
         path.parent.mkdir(parents=True)

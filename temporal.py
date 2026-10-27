@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import re
 import os
 import stat
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,8 @@ REQUIRED_FIELDS = ("id", "timestamp", "source", "event")
 OPTIONAL_FIELDS = ("local_timestamp", "refs", "metadata")
 MAX_RECORD_BYTES = 64 * 1024
 MAX_METADATA_DEPTH = 16
+WINDOWS_LOCK_TIMEOUT_SECONDS = 120.0
+WINDOWS_LOCK_RETRY_SECONDS = 0.05
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -185,8 +189,11 @@ def _open_regular_file(path: Path, flags: int, mode: str):
                   getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     descriptor = os.open(path, safe_flags, 0o666)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
             raise OSError(f"storage path is not a regular file: {path}")
+        if file_stat.st_nlink > 1:
+            raise OSError(f"refusing multiply-linked storage file: {path}")
         return os.fdopen(descriptor, mode, buffering=0)
     except BaseException:
         os.close(descriptor)
@@ -228,8 +235,23 @@ def _event_lock(events_root: Path, *, create: bool = True) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            # The CRT's LK_LOCK gives up after roughly ten one-second retries.
+            # Large cooperative append scans may legitimately hold the lock
+            # longer. Keep the wait bounded and retry only contention errors.
+            deadline = time.monotonic() + WINDOWS_LOCK_TIMEOUT_SECONDS
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    busy = exc.errno in (errno.EACCES, errno.EAGAIN)
+                    busy = busy or getattr(exc, "winerror", None) in (32, 33)
+                    if not busy:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out waiting for Temporal storage lock: {lock_path}") from exc
+                    time.sleep(WINDOWS_LOCK_RETRY_SECONDS)
             try:
                 yield
             finally:
@@ -260,6 +282,12 @@ def _load_events_unlocked(events_root: Path) -> list[dict[str, Any]]:
                 record = _decode_record_line(raw, path, line_number)
                 if not raw.endswith(b"\n"):
                     raise ValueError(f"unterminated NDJSON record in {path}:{line_number}")
+                stamp = parse_timestamp(record["timestamp"])
+                expected_path = (events_root / f"{stamp.year:04d}" /
+                                 f"{stamp.year:04d}-{stamp.month:02d}" /
+                                 f"{stamp.date().isoformat()}.ndjson")
+                if path != expected_path:
+                    raise ValueError(f"event in incorrect UTC date partition: {path}:{line_number}")
                 event_id = record["id"]
                 if event_id in seen_ids:
                     raise ValueError(f"duplicate event id in log: {event_id}")
