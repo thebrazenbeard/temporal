@@ -4,7 +4,7 @@
 
 timestamp of all events: Vera's watch
 
-Temporal is a deliberately small time-coded event logger. It records when events happened, lists them in chronological order, and calculates elapsed time between two known events or timestamps.
+Temporal is a deliberately small time-coded event logger. It stores caller-supplied event timestamps, lists them in chronological order, and calculates elapsed time between two known events or timestamps.
 
 It does **not** decide what an event means. A logged event is not automatically memory, current state, identity, preference, consent, authority, or proof that a proposition is true. Temporal supplies chronology; other systems decide meaning.
 
@@ -24,7 +24,17 @@ Each event requires:
 
 Optional fields are `local_timestamp`, `refs`, and small `metadata`.
 
+The parser rejects additional top-level fields, duplicate JSON keys (including nested keys),
+non-finite numeric values, invalid UTF-8/Unicode, and records larger than 64 KiB including
+their newline. Metadata may contain nested JSON objects and arrays up to 16 container levels;
+record and metadata object keys must be strings. Invalid input is rejected, never repaired
+silently. These limits apply equally to imported NDJSON and new events.
+
 Canonical `timestamp` values are timezone-aware UTC ISO-8601 values ending in `Z`. If an original local/offset timestamp matters, preserve it separately in `local_timestamp`.
+When present, `local_timestamp` must identify the same instant as `timestamp`; explicit offsets distinguish repeated local wall-clock times during daylight-saving transitions.
+Input supports at most six fractional digits (microsecond precision). Longer fractions are rejected rather than silently truncated.
+
+`timestamp` is a caller's claimed time for the event. Temporal does not measure event occurrence, observation, or record admission automatically; consumers needing those distinct time concepts must supply and govern them outside this V1 schema.
 
 ## Use
 
@@ -84,6 +94,32 @@ Use `--events-root PATH` before the subcommand to point at a different event dir
 - canonical ordering is timestamp, then stable ID;
 - arithmetic uses parsed timestamps, never inferred sequence;
 - no database, daemon, API server, framework, or web UI in V1.
+
+## Concurrent access and recovery
+
+Cooperating Temporal processes serialize reads and appends using an OS file
+lock at `events/.temporal.lock` (left in place permanently). A new event's
+duplicate-ID check and append occur under the same lock. Each NDJSON record is
+written as one binary line, followed by a file `fsync`. A crashed process
+releases its OS lock, but a crash, disk-full condition, or I/O fault during a
+write can still leave a partial final line. Temporal **fails closed** when
+reading malformed storage; it never silently truncates or repairs evidence.
+Inspect and back up a damaged log before performing an explicit repair.
+
+Reading a legacy or read-only snapshot with no lock file does not create one:
+it reads without locking. The first concurrent writer can race with such a
+reader; subsequent reads use the retained lock file. A live writable store
+should be initialized by a cooperating writer before concurrent readers start.
+Read-only snapshots must not be modified concurrently.
+
+Locks are advisory and only protect cooperating writers. The selected filesystem
+must actually honor its OS locking semantics; mixed Windows/POSIX or network
+shares are not independently qualified. Keep the event directory under a
+trusted account's control. POSIX append opens reject symlink leaf targets using
+`O_NOFOLLOW`; Windows rejects preexisting symlinks but cannot guarantee safety
+against a hostile concurrent path replacement. Preexisting symlink partition
+directories are rejected on all platforms, but hostile concurrent directory
+renames/replacements remain outside the guarantee.
 
 Design and implementation notes live under `docs/superpowers/`.
 
