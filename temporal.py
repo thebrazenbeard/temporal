@@ -177,7 +177,15 @@ def _validate_record(record: dict[str, Any], *, require_canonical_timestamp: boo
 def _event_files(events_root: Path) -> list[Path]:
     if not events_root.exists():
         return []
-    return sorted(path for path in events_root.rglob("*.ndjson") if path.is_file())
+    files: list[Path] = []
+    for path in events_root.rglob("*"):
+        # rglob does not descend through directory links, and is_file() drops
+        # dangling links and substituted directories. Never hide such damage.
+        if path.is_symlink():
+            raise OSError(f"refusing symlink storage path: {path}")
+        if path.name.endswith(".ndjson"):
+            files.append(path)
+    return sorted(files)
 
 
 def _open_regular_file(path: Path, flags: int, mode: str):

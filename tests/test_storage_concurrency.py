@@ -24,6 +24,39 @@ def _event(event_id: str) -> dict[str, str]:
 
 
 class ConcurrentStorageTests(unittest.TestCase):
+    def test_directory_at_ndjson_leaf_is_not_silently_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            invalid_leaf = root / "2026" / "2026-10" / "2026-10-27.ndjson"
+            invalid_leaf.mkdir(parents=True)
+            with self.assertRaises(OSError):
+                temporal.load_events(root)
+
+    def test_dangling_ndjson_symlink_is_not_silently_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            day = root / "2026" / "2026-10"
+            day.mkdir(parents=True)
+            dangling = day / "2026-10-27.ndjson"
+            try:
+                dangling.symlink_to(Path(tmp) / "missing-target.ndjson")
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            with self.assertRaises(OSError):
+                temporal.load_events(root)
+
+    def test_symlink_partition_directory_is_not_silently_ignored_on_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            root.mkdir()
+            year = root / "2026"
+            try:
+                year.symlink_to(Path(tmp) / "missing-year", target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            with self.assertRaises(OSError):
+                temporal.load_events(root)
+
     def test_reader_opens_existing_lock_without_write_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "events"
