@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from temporal import (
     append_event,
@@ -71,6 +76,144 @@ class TemporalWatchTests(unittest.TestCase):
         append_event(self.events_root, self.event("same", "2026-09-08T00:00:00Z"))
         with self.assertRaisesRegex(ValueError, "duplicate event id"):
             append_event(self.events_root, self.event("same", "2026-09-09T00:00:00Z"))
+
+    def test_parallel_same_id_is_serialized(self):
+        # Widen the read/append race so this test detects an unguarded implementation.
+        original_load = load_events
+
+        def delayed_load(root):
+            records = original_load(root)
+            time.sleep(0.03)
+            return records
+
+        def submit(_index):
+            try:
+                append_event(self.events_root, self.event("concurrent", "2026-09-08T00:00:00Z"))
+                return "accepted"
+            except ValueError as exc:
+                self.assertIn("duplicate event id", str(exc))
+                return "duplicate"
+
+        with patch("temporal.load_events", side_effect=delayed_load):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                outcomes = list(pool.map(submit, range(8)))
+        self.assertEqual(outcomes.count("accepted"), 1)
+        self.assertEqual(outcomes.count("duplicate"), 7)
+        self.assertEqual([event["id"] for event in load_events(self.events_root)], ["concurrent"])
+
+    def test_reader_waits_for_in_progress_append(self):
+        # Force an incomplete NDJSON line to exist while its writer holds the lock.
+        import temporal
+
+        paused = threading.Event()
+        resume = threading.Event()
+        original_write = temporal.os.write
+        first_write = True
+
+        def split_write(fd, data):
+            nonlocal first_write
+            if first_write:
+                first_write = False
+                half = original_write(fd, data[:len(data) // 2])
+                paused.set()
+                if not resume.wait(timeout=5):
+                    raise TimeoutError("test writer not released")
+                return half
+            return original_write(fd, data)
+
+        with patch("temporal.os.write", side_effect=split_write):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                future_writer = pool.submit(append_event, self.events_root,
+                                            self.event("partial", "2026-09-08T00:00:00Z"))
+                self.assertTrue(paused.wait(timeout=5))
+                future_reader = pool.submit(load_events, self.events_root)
+                self.assertFalse(future_reader.done())
+                resume.set()
+                future_writer.result(timeout=5)
+                self.assertEqual([event["id"] for event in future_reader.result(timeout=5)], ["partial"])
+
+    def test_append_refuses_symlinked_daily_file(self):
+        outside = Path(self.tmp.name) / "outside.ndjson"
+        outside.write_text("", encoding="utf-8")
+        day = self.events_root / "2026" / "2026-09" / "2026-09-08.ndjson"
+        day.parent.mkdir(parents=True)
+        try:
+            day.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("file symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            append_event(self.events_root, self.event("escape", "2026-09-08T00:00:00Z"))
+        self.assertEqual(outside.read_text(encoding="utf-8"), "")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            load_events(self.events_root)
+
+    def test_append_refuses_symlinked_month_directory(self):
+        outside = Path(self.tmp.name) / "outside-dir"
+        outside.mkdir()
+        year = self.events_root / "2026"
+        year.mkdir(parents=True)
+        month = year / "2026-09"
+        try:
+            month.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            append_event(self.events_root, self.event("escape-dir", "2026-09-08T00:00:00Z"))
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_load_rejects_duplicate_json_object_keys(self):
+        day = self.events_root / "2026" / "2026-09" / "2026-09-08.ndjson"
+        day.parent.mkdir(parents=True)
+        day.write_text('{"id":"a","id":"b","timestamp":"2026-09-08T00:00:00Z","source":"test","event":"bad"}\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            load_events(self.events_root)
+
+    def test_load_rejects_mispartitioned_event(self):
+        day = self.events_root / "2026" / "2026-09" / "2026-09-09.ndjson"
+        day.parent.mkdir(parents=True)
+        day.write_text(json.dumps(self.event("wrong-day", "2026-09-08T00:00:00Z")) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "partition"):
+            load_events(self.events_root)
+
+    def test_append_rejects_nonfinite_json_number(self):
+        event = self.event("nan", "2026-09-08T00:00:00Z")
+        event["metadata"] = {"score": float("nan")}
+        with self.assertRaisesRegex(ValueError, "finite|JSON"):
+            append_event(self.events_root, event)
+        self.assertEqual(load_events(self.events_root), [])
+
+    def test_read_rejects_nonfinite_json_number(self):
+        day = self.events_root / "2026" / "2026-09" / "2026-09-08.ndjson"
+        day.parent.mkdir(parents=True)
+        day.write_text('{"id":"bad","timestamp":"2026-09-08T00:00:00Z","source":"test","event":"bad","metadata":{"score":NaN}}\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            load_events(self.events_root)
+
+    def test_local_timestamp_represents_same_instant(self):
+        event = self.event("bad-local", "2026-09-08T00:00:00Z")
+        event["local_timestamp"] = "2026-09-09T00:00:00-04:00"
+        with self.assertRaisesRegex(ValueError, "local_timestamp"):
+            append_event(self.events_root, event)
+
+    def test_cross_process_same_id_has_one_success(self):
+        script = Path(__file__).resolve().parents[1] / "temporal.py"
+        command = [sys.executable, str(script), "--events-root", str(self.events_root), "append",
+                   "--id", "cross-process", "--timestamp", "2026-09-08T00:00:00Z",
+                   "--source", "test", "--event", "concurrent"]
+        workers = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                   for _ in range(8)]
+        outputs = [worker.communicate(timeout=15) for worker in workers]
+        statuses = [worker.returncode for worker in workers]
+        self.assertEqual(statuses.count(0), 1, (statuses, outputs))
+        self.assertEqual(statuses.count(2), 7, (statuses, outputs))
+        self.assertEqual([record["id"] for record in load_events(self.events_root)], ["cross-process"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO")
+    def test_read_rejects_fifo_lock_without_blocking(self):
+        self.events_root.mkdir()
+        os.mkfifo(self.events_root / ".temporal-append.lock")
+        with self.assertRaisesRegex(ValueError, "lock is not a regular file"):
+            load_events(self.events_root)
 
     def test_load_events_fails_on_malformed_json(self):
         path = self.events_root / "2026" / "2026-09" / "2026-09-08.ndjson"
