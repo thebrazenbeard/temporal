@@ -67,6 +67,24 @@ python temporal.py list \
   --end 2026-09-08T20:00:00Z
 ```
 
+Find a caller-recorded event by provenance and text, and return the latest
+matching records (still in chronological order):
+
+```bash
+python temporal.py list \
+  --source chatgpt \
+  --event-contains "export requested" \
+  --ref chat:vera-mono \
+  --tail 20
+```
+
+`--source` and `--ref` are exact, case-sensitive matches. `--event-contains`
+is a case-insensitive substring match. `--tail N` accepts a positive integer
+and applies after all timestamp and content filters. An empty result means no
+matching events **in the selected local event store**, not that the event
+never occurred. Temporal cannot discover external chat events automatically;
+a trusted producer must record a source timestamp and reference first.
+
 Calculate elapsed time between two event IDs:
 
 ```bash
