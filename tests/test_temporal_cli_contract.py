@@ -70,6 +70,47 @@ class TemporalCliContractTests(unittest.TestCase):
         self.assertEqual(bounded.returncode, 0, bounded.stderr)
         self.assertEqual([json.loads(line)["id"] for line in bounded.stdout.splitlines()], ["a", "b", "z"])
 
+    def test_list_filters_ledger_events_and_tails_latest_matching_entries(self):
+        rows = (
+            ("other", "2026-10-28T00:00:00Z", "chatgpt", "other conversation", []),
+            ("request-old", "2026-10-28T01:00:00Z", "chatgpt", "Account EXPORT requested", ["chat:vera-mono"]),
+            ("ignored", "2026-10-28T01:30:00Z", "github", "export requested", ["chat:vera-mono"]),
+            ("request-new", "2026-10-28T02:00:00Z", "chatgpt", "Export requested again", ["chat:vera-mono"]),
+            ("request-other", "2026-10-28T03:00:00Z", "chatgpt", "export requested", ["chat:vera-unbound"]),
+        )
+        for event_id, stamp, source, label, refs in rows:
+            args = ["append", "--id", event_id, "--timestamp", stamp,
+                    "--source", source, "--event", label]
+            for ref in refs:
+                args.extend(("--ref", ref))
+            created = self.invoke(*args)
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+        filtered = self.invoke(
+            "list", "--source", "chatgpt", "--event-contains", "export",
+            "--ref", "chat:vera-mono", "--tail", "1",
+        )
+        self.assertEqual(filtered.returncode, 0, filtered.stderr)
+        self.assertEqual([json.loads(line)["id"] for line in filtered.stdout.splitlines()], ["request-new"])
+
+        all_matching = self.invoke(
+            "list", "--source", "chatgpt", "--event-contains", "EXPORT",
+            "--ref", "chat:vera-mono",
+        )
+        self.assertEqual(all_matching.returncode, 0, all_matching.stderr)
+        self.assertEqual(
+            [json.loads(line)["id"] for line in all_matching.stdout.splitlines()],
+            ["request-old", "request-new"],
+        )
+
+    def test_list_rejects_non_positive_tail(self):
+        for tail in ("0", "-1"):
+            with self.subTest(tail=tail):
+                result = self.invoke("list", "--tail", tail)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("tail", result.stderr.lower())
+
     def test_duplicate_append_fails_without_modifying_prior_bytes(self):
         created = self.append("stable", "2026-10-27T00:00:00Z", "original")
         self.assertEqual(created.returncode, 0, created.stderr)
