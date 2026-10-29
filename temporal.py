@@ -343,7 +343,18 @@ def append_event(events_root: Path, event: dict[str, Any]) -> dict[str, Any]:
     return candidate
 
 
-def list_events(events_root: Path, start: str | None = None, end: str | None = None) -> list[dict[str, Any]]:
+def list_events(
+    events_root: Path,
+    start: str | None = None,
+    end: str | None = None,
+    *,
+    source: str | None = None,
+    event_contains: str | None = None,
+    ref: str | None = None,
+    tail: int | None = None,
+) -> list[dict[str, Any]]:
+    if tail is not None and tail < 1:
+        raise ValueError("tail must be a positive integer")
     events = load_events(Path(events_root))
     start_dt = parse_timestamp(start).astimezone(timezone.utc) if start is not None else None
     end_dt = parse_timestamp(end).astimezone(timezone.utc) if end is not None else None
@@ -357,7 +368,15 @@ def list_events(events_root: Path, start: str | None = None, end: str | None = N
             continue
         if end_dt is not None and stamp > end_dt:
             continue
+        if source is not None and event["source"] != source:
+            continue
+        if event_contains is not None and event_contains.casefold() not in event["event"].casefold():
+            continue
+        if ref is not None and ref not in event.get("refs", []):
+            continue
         result.append(event)
+    if tail is not None:
+        return result[-tail:]
     return result
 
 
@@ -399,6 +418,10 @@ def _build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="list events chronologically")
     list_parser.add_argument("--start")
     list_parser.add_argument("--end")
+    list_parser.add_argument("--source", help="match exact event source")
+    list_parser.add_argument("--event-contains", help="case-insensitive event text search")
+    list_parser.add_argument("--ref", help="match one exact event reference")
+    list_parser.add_argument("--tail", type=int, help="last N matching events in chronological order")
 
     between_parser = subparsers.add_parser("between", help="calculate elapsed seconds between IDs or timestamps")
     between_parser.add_argument("--start", required=True)
@@ -433,7 +456,11 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "list":
-            for event in list_events(args.events_root, args.start, args.end):
+            for event in list_events(
+                args.events_root, args.start, args.end,
+                source=args.source, event_contains=args.event_contains,
+                ref=args.ref, tail=args.tail,
+            ):
                 print(json.dumps(event, ensure_ascii=True, sort_keys=True))
             return 0
 
