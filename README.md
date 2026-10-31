@@ -1,152 +1,123 @@
-> **License:** Source-visible, not open source. Original material is proprietary. Commercial use, redistribution, hosted-service use, and commercial derivative products require written permission. See [LICENSE](LICENSE) and [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md). Separately identified third-party components retain their own licenses.
+# Temporal
 
-# temporal
+**A small, file-backed chronology ledger for timestamped events.**
 
-timestamp of all events: Vera's watch
+Temporal is a dependency-free Python command-line tool and importable module for recording caller-supplied events, listing them in deterministic chronological order, filtering by provenance, and calculating signed elapsed time. It is suitable for local research logs, build or workflow event histories, audit-supporting timelines, and other cases where a readable record of *what a producer reported and when it claimed it occurred* is useful.
 
-Temporal is a deliberately small time-coded event logger. It stores caller-supplied event timestamps, lists them in chronological order, and calculates elapsed time between two known events or timestamps.
+Temporal does not authenticate the producer, attest that an event happened, capture timestamps independently, or turn chronology into memory, identity, consent, current state, or permission to act. A trusted application must manage those concerns separately.
 
-It does **not** decide what an event means. A logged event is not automatically memory, current state, identity, preference, consent, authority, or proof that a proposition is true. Temporal supplies chronology; other systems decide meaning.
+> **License:** The original material is source-available under a proprietary license, **not open source**. The repository permits limited private noncommercial evaluation but does not grant general redistribution, hosted-service, commercial-use, or derivative-publication rights. Read [LICENSE](LICENSE) and [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md); independently licensed third-party material retains its own terms.
 
-## Event log
+## What exists
 
-Events are newline-delimited JSON (NDJSON), partitioned by canonical UTC date:
+| Capability | Current implementation |
+| --- | --- |
+| Event append | Validates and writes one NDJSON record into a UTC-date partition; rejects duplicate IDs. |
+| Chronological queries | Lists by timestamp then stable ID; supports inclusive time bounds, exact source/reference filters, case-insensitive event-text search, and a positive `--tail` limit. |
+| Elapsed time | Reports signed seconds between two known event IDs, two offset-aware timestamps, or one of each. |
+| Storage validation | Rejects malformed and oversized records, duplicate JSON keys, invalid UTF-8, nonfinite numbers, disallowed fields, wrong UTC-day partitions, and invalid timestamps. |
+| Cooperative access | Uses a retained OS advisory lock, duplicate-ID check under that lock, and a synchronized append followed by file `fsync`. |
+| Recovery behavior | Fails loudly on malformed or incomplete storage. Repairs and backups are operator-managed; no automatic recovery is claimed. |
+
+Temporal V1 has no database, daemon, web UI, remote API, distributed consensus, or authorization service. It is a single-file Python program (`temporal.py`), not an installed Python package.
+
+## Quick start
+
+Use Python 3.12 (the version exercised by the repository's GitHub Actions workflow). There are no third-party runtime dependencies. From a source checkout, use an event directory you control; in the examples below, `./example-events` is a generic local path.
+
+Append two events:
+
+```bash
+python temporal.py --events-root ./example-events append \
+  --id build-001-start \
+  --timestamp 2026-10-01T09:00:00-04:00 \
+  --local-timestamp 2026-10-01T09:00:00-04:00 \
+  --source build-runner \
+  --event "Build started" \
+  --ref build:001
+
+python temporal.py --events-root ./example-events append \
+  --id build-001-end \
+  --timestamp 2026-10-01T13:05:30Z \
+  --source build-runner \
+  --event "Build completed" \
+  --ref build:001
+```
+
+The first event is stored at the equivalent canonical UTC instant `2026-10-01T13:00:00Z`. By default the tool stores events next to `temporal.py` under `events/`; `--events-root PATH` overrides that directory and **must appear before the subcommand**.
+
+List the events:
+
+```bash
+python temporal.py --events-root ./example-events list
+```
+
+Filter by inclusive timestamp bounds or reported provenance:
+
+```bash
+python temporal.py --events-root ./example-events list \
+  --start 2026-10-01T13:00:00Z \
+  --end 2026-10-01T13:06:00Z
+
+python temporal.py --events-root ./example-events list \
+  --source build-runner \
+  --event-contains "completed" \
+  --ref build:001 \
+  --tail 10
+```
+
+`--source` and `--ref` match exactly and case-sensitively; `--event-contains` is case-insensitive. `--tail N` is applied after other filters and requires a positive integer. No matching local records does not establish that an event never occurred elsewhere.
+
+Calculate elapsed time by ID or by literal timestamps:
+
+```bash
+python temporal.py --events-root ./example-events between \
+  --start build-001-start \
+  --end build-001-end
+
+python temporal.py --events-root ./example-events between \
+  --start 2026-10-01T13:05:30Z \
+  --end 2026-10-01T13:00:00Z
+```
+
+The first result is **330 seconds**; the reversed literal interval is **−330 seconds**. Output is JSON. Event IDs must be unique across the selected event store.
+
+## Data contract
+
+Temporal writes one JSON object per line into UTC partitions:
 
 ```text
 events/YYYY/YYYY-MM/YYYY-MM-DD.ndjson
 ```
 
-Each event requires:
+Required fields are `id`, `timestamp`, `source`, and `event`:
 
 ```json
-{"id":"stable-id","timestamp":"2026-09-08T18:07:09Z","source":"github","event":"Temporal repository created"}
+{"id":"build-001-start","timestamp":"2026-10-01T13:00:00Z","source":"build-runner","event":"Build started"}
 ```
 
-Optional fields are `local_timestamp`, `refs`, and small `metadata`.
+Optional fields are `local_timestamp`, `refs` (an array of nonempty strings), and `metadata` (a JSON object). Additional top-level fields are not accepted. `timestamp` must be a timezone-aware ISO-8601 instant, stored in canonical UTC format ending in `Z`. If provided, `local_timestamp` must describe that **same instant**; preserve explicit numeric offsets to distinguish repeated daylight-saving wall-clock hours.
 
-The parser rejects additional top-level fields, duplicate JSON keys (including nested keys),
-non-finite numeric values, invalid UTF-8/Unicode, and records larger than 64 KiB including
-their newline. Metadata may contain nested JSON objects and arrays up to 16 container levels;
-record and metadata object keys must be strings. Invalid input is rejected, never repaired
-silently. Each stored record must also match its UTC-day file partition. These
-limits apply equally to imported NDJSON and new events.
+The parser accepts at most six fractional digits in timestamps, rejects nonfinite numeric values, duplicate JSON object keys even in nested objects, unpaired invalid Unicode, oversized lines, and metadata nested more than 16 object/array container levels. Each stored NDJSON line including its newline is limited to **64 KiB**. Events are sorted by parsed instant, then by ID, not by filename or submission order. A caller-supplied timestamp records a claim; Temporal does not independently record observation time or admission time.
 
-Canonical `timestamp` values are timezone-aware UTC ISO-8601 values ending in `Z`. If an original local/offset timestamp matters, preserve it separately in `local_timestamp`.
-When present, `local_timestamp` must identify the same instant as `timestamp`; explicit offsets distinguish repeated local wall-clock times during daylight-saving transitions.
-Input supports at most six fractional digits (microsecond precision). Longer fractions are rejected rather than silently truncated.
+## Integrity, concurrency, and recovery boundaries
 
-`timestamp` is a caller's claimed time for the event. Temporal does not measure event occurrence, observation, or record admission automatically; consumers needing those distinct time concepts must supply and govern them outside this V1 schema.
+- Cooperating processes serialize reads and writes through an OS advisory lock at `events/.temporal.lock`. The lock file remains after the process exits. An append's duplicate-ID check and write occur in the same lock scope. On Windows the implementation retries transient lock contention for up to 120 seconds before failing.
+- The file append is one binary NDJSON line with an `fsync`. This does **not** make a complete multi-file transaction or guarantee recovery from power loss, disk failure, or a partially written final line. A damaged record causes reads and subsequent appends to fail closed; inspect and back up storage before explicit repair.
+- Reading an old read-only snapshot without a lock file does not create one and therefore cannot synchronize with the snapshot's first concurrent writer. Do not modify read-only snapshots during a scan.
+- Storage paths that are already symlinks or multiply-linked regular files are rejected at relevant boundaries. POSIX leaf-file opens use `O_NOFOLLOW`; Windows lacks an equivalent guarantee against hostile concurrent path replacement. Neither implementation defends against an adversary who can race ancestor directory replacement.
+- Locking assumes a trustworthy local filesystem and cooperating processes. Mixed-OS network shares, advisory locking on all filesystems, hostile co-tenants with write access, and very large histories are **not independently qualified**. Restrict access to the event directory; this is not a tamper-evident or append-only security log against its host administrator.
 
-## Use
+The code does not turn logs into authorization evidence. Downstream tools must authenticate actors, validate consent and action scope, and independently verify any significant external effects.
 
-No dependencies beyond Python 3.
+## Verification and development
 
-Append an event:
+The repository contains Python unit and CLI-contract tests, parser-hardening checks, concurrent-process storage tests, and workspace-startup safety checks.
 
 ```bash
-python temporal.py append \
-  --id 20260908T180709Z-temporal-created \
-  --timestamp 2026-09-08T14:07:09-04:00 \
-  --local-timestamp 2026-09-08T14:07:09-04:00 \
-  --source github \
-  --event "Temporal repository created" \
-  --ref thebrazenbeard/temporal
+python -B -m unittest discover -s tests -v
 ```
 
-List events in chronological order:
+GitHub Actions runs this suite on Python 3.12 under Ubuntu and Windows. Read `temporal.py` for the current CLI and module APIs; `docs/superpowers/` contains implementation notes.
 
-```bash
-python temporal.py list
-```
-
-Bound the list by inclusive timestamps:
-
-```bash
-python temporal.py list \
-  --start 2026-09-08T18:00:00Z \
-  --end 2026-09-08T20:00:00Z
-```
-
-Find a caller-recorded event by provenance and text, and return the latest
-matching records (still in chronological order):
-
-```bash
-python temporal.py list \
-  --source chatgpt \
-  --event-contains "export requested" \
-  --ref chat:vera-mono \
-  --tail 20
-```
-
-`--source` and `--ref` are exact, case-sensitive matches. `--event-contains`
-is a case-insensitive substring match. `--tail N` accepts a positive integer
-and applies after all timestamp and content filters. An empty result means no
-matching events **in the selected local event store**, not that the event
-never occurred. Temporal cannot discover external chat events automatically;
-a trusted producer must record a source timestamp and reference first.
-
-Calculate elapsed time between two event IDs:
-
-```bash
-python temporal.py between \
-  --start 20260908T180709Z-temporal-created \
-  --end 20260908T192656Z-design-committed
-```
-
-Or use literal offset-aware timestamps:
-
-```bash
-python temporal.py between \
-  --start 2026-09-08T14:00:00-04:00 \
-  --end 2026-09-08T18:30:00Z
-```
-
-`between` returns signed elapsed seconds. Reversing the endpoints produces a negative value rather than silently reordering them.
-
-Use `--events-root PATH` before the subcommand to point at a different event directory, which is useful for tests or temporary logs.
-
-## Rules
-
-- append-oriented history;
-- duplicate event IDs are rejected;
-- malformed JSON or malformed records fail loudly;
-- canonical ordering is timestamp, then stable ID;
-- arithmetic uses parsed timestamps, never inferred sequence;
-- no database, daemon, API server, framework, or web UI in V1.
-
-## Concurrent access and recovery
-
-Cooperating Temporal processes serialize reads and appends using an OS file
-lock at `events/.temporal.lock` (left in place permanently). A new event's
-duplicate-ID check and append occur under the same lock. Each NDJSON record is
-written as one binary line, followed by a file `fsync`. A crashed process
-releases its OS lock, but a crash, disk-full condition, or I/O fault during a
-write can still leave a partial final line. Temporal **fails closed** when
-reading malformed storage; it never silently truncates or repairs evidence.
-On Windows, cooperating operations retry transient lock contention for at most
-120 seconds, then fail explicitly; large histories still require performance
-qualification. Static symlinks and multiply-linked storage files are refused,
-but this does **not** protect an event directory writable by an adversary who
-can race ancestor-directory replacement.
-Inspect and back up a damaged log before performing an explicit repair.
-
-Reading a legacy or read-only snapshot with no lock file does not create one:
-it reads without locking. The first concurrent writer can race with such a
-reader; subsequent reads use the retained lock file. A live writable store
-should be initialized by a cooperating writer before concurrent readers start.
-Read-only snapshots must not be modified concurrently.
-
-Locks are advisory and only protect cooperating writers. The selected filesystem
-must actually honor its OS locking semantics; mixed Windows/POSIX or network
-shares are not independently qualified. Keep the event directory under a
-trusted account's control. POSIX append opens reject symlink leaf targets using
-`O_NOFOLLOW`; Windows rejects preexisting symlinks but cannot guarantee safety
-against a hostile concurrent path replacement. Preexisting symlink partition
-directories are rejected on all platforms, but hostile concurrent directory
-renames/replacements remain outside the guarantee.
-
-Design and implementation notes live under `docs/superpowers/`.
-
-## Editor startup safety
-
-The active source tree removes a concealed VS Code `folderOpen` Node task and a disguised `public/fonts/fa-solid.lkf` executable. Automatic workspace tasks are disabled, and source-level CI rejects reintroduction. The prior code remains recoverable in Git history. This containment does **not** establish whether it previously executed on a host or that local clones, editor extensions, scheduled tasks, processes, or credentials are clean. Do not run unreviewed historical payloads.
+**Workspace safety history:** The current repository removes a concealed VS Code `folderOpen` executable task and a disguised `public/fonts/fa-solid.lkf` executable. Source-level tests guard against their reintroduction and automatic tasks are disabled. That containment is not proof that historical payloads never executed or that every existing clone, editor, process, or credential is clean. Do not execute unreviewed historical artifacts.
