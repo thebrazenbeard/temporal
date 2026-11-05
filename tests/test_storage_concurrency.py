@@ -44,6 +44,33 @@ class ConcurrentStorageTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 temporal.load_events(root)
 
+    def test_existing_events_root_symlink_cannot_redirect_read_or_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside-events"
+            temporal.append_event(outside, _event("existing"))
+            original = list(outside.rglob("*.ndjson"))[0].read_bytes()
+            root = Path(tmp) / "events"
+            try:
+                root.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            with self.assertRaises(OSError):
+                temporal.load_events(root)
+            with self.assertRaises(OSError):
+                temporal.append_event(root, _event("not-admitted"))
+            self.assertEqual(list(outside.rglob("*.ndjson"))[0].read_bytes(), original)
+
+    def test_ntfs_junction_root_indicator_fails_closed_before_lock_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            root.mkdir()
+            with patch.object(Path, "is_junction", create=True, return_value=True):
+                with self.assertRaises(OSError):
+                    temporal.load_events(root)
+                with self.assertRaises(OSError):
+                    temporal.append_event(root, _event("not-admitted"))
+            self.assertFalse((root / ".temporal.lock").exists())
+
     def test_directory_at_ndjson_leaf_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "events"
@@ -347,3 +374,4 @@ class ConcurrentStorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
