@@ -44,6 +44,68 @@ class ConcurrentStorageTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 temporal.load_events(root)
 
+    def test_existing_events_root_symlink_cannot_redirect_read_or_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside-events"
+            temporal.append_event(outside, _event("existing"))
+            original = list(outside.rglob("*.ndjson"))[0].read_bytes()
+            root = Path(tmp) / "events"
+            try:
+                root.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            with self.assertRaises(OSError):
+                temporal.load_events(root)
+            with self.assertRaises(OSError):
+                temporal.append_event(root, _event("not-admitted"))
+            self.assertEqual(list(outside.rglob("*.ndjson"))[0].read_bytes(), original)
+
+    def test_ntfs_junction_root_indicator_fails_closed_before_lock_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "events"
+            root.mkdir()
+            with patch.object(Path, "is_junction", create=True, return_value=True):
+                with self.assertRaises(OSError):
+                    temporal.load_events(root)
+                with self.assertRaises(OSError):
+                    temporal.append_event(root, _event("not-admitted"))
+            self.assertFalse((root / ".temporal.lock").exists())
+
+    def test_symlinked_parent_cannot_redirect_root_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside-parent"
+            outside.mkdir()
+            parent = Path(tmp) / "linked-parent"
+            try:
+                parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            selected_root = parent / "events"
+            with self.assertRaises(OSError):
+                temporal.append_event(selected_root, _event("not-admitted"))
+            self.assertFalse((outside / "events").exists())
+            (outside / "events").mkdir()
+            with self.assertRaises(OSError):
+                temporal.load_events(selected_root)
+
+    def test_junction_parent_indicator_blocks_storage_before_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "simulated-junction"
+            root = parent / "events"
+            root.mkdir(parents=True)
+            with patch.object(Path, "is_junction", create=True,
+                              autospec=True, side_effect=lambda path: path.name == "simulated-junction"):
+                with self.assertRaises(OSError):
+                    temporal.append_event(root, _event("not-admitted"))
+            self.assertFalse((root / ".temporal.lock").exists())
+
+    def test_lexical_parent_traversal_is_not_silently_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "first" / ".." / "events"
+            with self.assertRaises(OSError):
+                temporal.append_event(root, _event("not-admitted"))
+            self.assertFalse((Path(tmp) / "events").exists())
+
     def test_directory_at_ndjson_leaf_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "events"
@@ -347,3 +409,4 @@ class ConcurrentStorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

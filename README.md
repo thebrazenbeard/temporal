@@ -105,10 +105,14 @@ The parser accepts at most six fractional digits in timestamps, rejects nonfinit
 - Cooperating processes serialize reads and writes through an OS advisory lock at `events/.temporal.lock`. The lock file remains after the process exits. An append's duplicate-ID check and write occur in the same lock scope. On Windows the implementation retries transient lock contention for up to 120 seconds before failing.
 - The file append is one binary NDJSON line with an `fsync`. This does **not** make a complete multi-file transaction or guarantee recovery from power loss, disk failure, or a partially written final line. A damaged record causes reads and subsequent appends to fail closed; inspect and back up storage before explicit repair.
 - Reading an old read-only snapshot without a lock file does not create one and therefore cannot synchronize with the snapshot's first concurrent writer. Do not modify read-only snapshots during a scan.
-- Storage paths that are already symlinks or multiply-linked regular files are rejected at relevant boundaries. POSIX leaf-file opens use `O_NOFOLLOW`; Windows lacks an equivalent guarantee against hostile concurrent path replacement. Neither implementation defends against an adversary who can race ancestor directory replacement.
+- Storage paths that are already symlinks (including any existing ancestor of `--events-root`), NTFS junctions, or multiply-linked regular files are rejected at relevant boundaries. Lexical `..` traversal in the selected root is refused rather than normalized across a possible link. POSIX leaf-file opens use `O_NOFOLLOW`; Windows lacks an equivalent guarantee against hostile concurrent path replacement. Neither implementation defends against an adversary who can race ancestor directory replacement.
 - Locking assumes a trustworthy local filesystem and cooperating processes. Mixed-OS network shares, advisory locking on all filesystems, hostile co-tenants with write access, and very large histories are **not independently qualified**. Restrict access to the event directory; this is not a tamper-evident or append-only security log against its host administrator.
 
 The code does not turn logs into authorization evidence. Downstream tools must authenticate actors, validate consent and action scope, and independently verify any significant external effects.
+
+## Optional Blotter chronology projection
+
+The side-effect-free `integrations.blotter_projection` module can transform an already-authorized **unfiltered, contiguous** Blotter page into minimal Temporal event records without copying messages, payloads or actors. It does not fetch from Blotter, authenticate a source, append to storage, or persist a replay cursor. Wall-clock timestamps are not Blotter commit order; the original sequence remains explicit metadata. See [the integration contract](integrations/README.md). No live bridge is installed by this source change.
 
 ## Verification and development
 
@@ -121,3 +125,4 @@ python -B -m unittest discover -s tests -v
 GitHub Actions runs this suite on Python 3.12 under Ubuntu and Windows. Read `temporal.py` for the current CLI and module APIs; `docs/superpowers/` contains implementation notes.
 
 **Workspace safety history:** The current repository removes a concealed VS Code `folderOpen` executable task and a disguised `public/fonts/fa-solid.lkf` executable. Source-level tests guard against their reintroduction and automatic tasks are disabled. That containment is not proof that historical payloads never executed or that every existing clone, editor, process, or credential is clean. Do not execute unreviewed historical artifacts.
+

@@ -213,6 +213,21 @@ def _open_regular_file(path: Path, flags: int, mode: str):
         raise
 
 
+def _is_redirecting_root(path: Path) -> bool:
+    # Inspect every currently existing ancestor, not just the leaf root:
+    # parent_link/events is an ordinary directory path but still redirects.
+    # Reject lexical parent traversal before Path.absolute() normalizes it,
+    # since link/../events can resolve differently under filesystem traversal.
+    if ".." in path.parts:
+        raise OSError(f"refusing parent traversal in event root: {path}")
+    absolute = path.absolute()
+    for component in (absolute, *absolute.parents):
+        # NTFS junctions redirect traversal but need not count as symlinks.
+        if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
+            return True
+    return False
+
+
 def _ensure_partition_directories(events_root: Path, stamp: datetime) -> Path:
     # Reject existing symlink ancestors; hostile concurrent directory swaps
     # still require a trusted events_root and are not guarded by this check.
@@ -234,9 +249,13 @@ def _event_lock(events_root: Path, *, create: bool = True) -> Iterator[None]:
     OS locks are released after process termination; the lock file itself is
     deliberately retained. A shared network filesystem must honor these locks.
     """
+    if _is_redirecting_root(events_root):
+        raise OSError(f"refusing redirected event root: {events_root}")
     lock_path = events_root / ".temporal.lock"
     if create:
         events_root.mkdir(parents=True, exist_ok=True)
+        if _is_redirecting_root(events_root):
+            raise OSError(f"refusing redirected event root: {events_root}")
     elif not lock_path.exists() and not lock_path.is_symlink():
         # Old read-only snapshots have no lock file. Do not modify them merely
         # to list events. Their first concurrent writer is not synchronized.
@@ -312,8 +331,8 @@ def _load_events_unlocked(events_root: Path) -> list[dict[str, Any]]:
 
 def load_events(events_root: Path) -> list[dict[str, Any]]:
     events_root = Path(events_root)
-    if events_root.is_symlink() and not events_root.exists():
-        raise OSError(f"event root is a dangling symlink: {events_root}")
+    if _is_redirecting_root(events_root):
+        raise OSError(f"refusing redirected event root: {events_root}")
     if not events_root.exists():
         return []
     with _event_lock(events_root, create=False):
@@ -487,3 +506,4 @@ def _main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(_main())
+
