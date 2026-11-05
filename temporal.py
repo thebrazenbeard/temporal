@@ -214,9 +214,18 @@ def _open_regular_file(path: Path, flags: int, mode: str):
 
 
 def _is_redirecting_root(path: Path) -> bool:
-    # On Windows, NTFS junctions redirect directory traversal but need not be
-    # reported as symlinks. pathlib exposes is_junction on supported Pythons.
-    return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+    # Inspect every currently existing ancestor, not just the leaf root:
+    # parent_link/events is an ordinary directory path but still redirects.
+    # Reject lexical parent traversal before Path.absolute() normalizes it,
+    # since link/../events can resolve differently under filesystem traversal.
+    if ".." in path.parts:
+        raise OSError(f"refusing parent traversal in event root: {path}")
+    absolute = path.absolute()
+    for component in (absolute, *absolute.parents):
+        # NTFS junctions redirect traversal but need not count as symlinks.
+        if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
+            return True
+    return False
 
 
 def _ensure_partition_directories(events_root: Path, stamp: datetime) -> Path:

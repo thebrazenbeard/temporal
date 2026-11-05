@@ -71,6 +71,41 @@ class ConcurrentStorageTests(unittest.TestCase):
                     temporal.append_event(root, _event("not-admitted"))
             self.assertFalse((root / ".temporal.lock").exists())
 
+    def test_symlinked_parent_cannot_redirect_root_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside-parent"
+            outside.mkdir()
+            parent = Path(tmp) / "linked-parent"
+            try:
+                parent.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("creating symlinks requires platform privileges")
+            selected_root = parent / "events"
+            with self.assertRaises(OSError):
+                temporal.append_event(selected_root, _event("not-admitted"))
+            self.assertFalse((outside / "events").exists())
+            (outside / "events").mkdir()
+            with self.assertRaises(OSError):
+                temporal.load_events(selected_root)
+
+    def test_junction_parent_indicator_blocks_storage_before_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "simulated-junction"
+            root = parent / "events"
+            root.mkdir(parents=True)
+            with patch.object(Path, "is_junction", create=True,
+                              autospec=True, side_effect=lambda path: path.name == "simulated-junction"):
+                with self.assertRaises(OSError):
+                    temporal.append_event(root, _event("not-admitted"))
+            self.assertFalse((root / ".temporal.lock").exists())
+
+    def test_lexical_parent_traversal_is_not_silently_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "first" / ".." / "events"
+            with self.assertRaises(OSError):
+                temporal.append_event(root, _event("not-admitted"))
+            self.assertFalse((Path(tmp) / "events").exists())
+
     def test_directory_at_ndjson_leaf_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "events"
