@@ -150,6 +150,10 @@ def check_font_blob(name: str, content: bytes) -> None:
     expected = KNOWN_FONTS.get(name)
     if expected is None:
         raise AssertionError("unexpected font asset: " + name)
+    # Git for Windows may check out text SVGs with CRLF while the Git blobs
+    # contain LF. Normalize only that text-file transport difference.
+    if name.endswith(".svg"):
+        content = content.replace(b"\r\n", b"\n")
     if hashlib.sha256(content).hexdigest() != expected:
         raise AssertionError("font content differs from known-good asset: " + name)
 
@@ -246,6 +250,13 @@ class WorkspaceStartupSafetyTests(unittest.TestCase):
             check_font_blob("fa-solid-900.ttf", forged_ttf)
         with self.assertRaises(AssertionError):
             check_font_blob("fa-solid-600.ttf", forged_ttf)
+
+    def test_svg_checkout_newlines_canonicalize_without_weakening_hash(self):
+        name = "fa-brands-400.svg"
+        baseline = (ROOT / "public" / "fonts" / name).read_bytes()
+        check_font_blob(name, baseline.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        with self.assertRaises(AssertionError):
+            check_font_blob(name, baseline + b"<script>not a font</script>")
 
     def test_invalid_and_duplicate_jsonc_fail_closed(self):
         for source in (
