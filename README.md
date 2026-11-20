@@ -121,3 +121,9 @@ python -B -m unittest discover -s tests -v
 GitHub Actions runs this suite on Python 3.12 under Ubuntu and Windows. Read `temporal.py` for the current CLI and module APIs; `docs/superpowers/` contains implementation notes.
 
 **Workspace safety history:** The current repository removes a concealed VS Code `folderOpen` executable task and a disguised `public/fonts/fa-solid.lkf` executable. Source-level tests guard against their reintroduction and automatic tasks are disabled. That containment is not proof that historical payloads never executed or that every existing clone, editor, process, or credential is clean. Do not execute unreviewed historical artifacts.
+
+## Editor startup containment — tracked source (2026-11-20)
+
+The tracked `main` source formerly contained a concealed VS Code `folderOpen` task invoking obfuscated `.vscode/ini` through Node. The task list is now empty, `task.allowAutomaticTasks` is explicitly `"off"`, and the obfuscated file is removed from this source tree. Historical Git source remains for investigation.
+
+**Limits:** This is source-only containment, not proof that older checkouts, editor extensions, user/global settings, local credentials, or any previous host execution are safe. Do not execute historical suspect assets.

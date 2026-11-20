@@ -1,5 +1,4 @@
 __pycache__/
 *.py[cod]
 .temporal.lock
-config.bat
 node_modules
